@@ -1,4 +1,5 @@
 // TODO: Improve error reporting
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -37,7 +38,7 @@ void add_history(char* unused) {}
   }
 
 
-typedef enum { LVAL_NUM, LVAL_ERR, LVAL_FUN, 
+typedef enum { LVAL_NUM, LVAL_ERR, LVAL_FUN, LVAL_BOOL, 
                LVAL_SYM, LVAL_SEXPR, LVAL_QEXPR } Val_Type;
 
 struct lval;
@@ -51,6 +52,7 @@ struct lval {
   Val_Type type;
   /* Basic */
   long num;
+  bool boolean;
   char* err;
   char* sym;
   /* Functions */
@@ -152,6 +154,13 @@ lval* lval_num(long x) {
   return v;
 }
 
+lval* lval_bool(bool b) {
+  lval* v = malloc(sizeof(lval));
+  v->type = LVAL_BOOL;
+  v->boolean = b;
+  return v;
+}
+
 lval* lval_err(char* fmt, ...) {
   lval* v = malloc(sizeof(lval));
   v->type = LVAL_ERR;
@@ -209,7 +218,8 @@ lval* lval_qexpr(void) {
 void lval_del(lval* v) {
   switch (v->type) {
     case LVAL_NUM: 
-    break;
+    case LVAL_BOOL:
+      break;
     case LVAL_FUN:
       if (v->builtin == NULL) {
         lenv_del(v->env);
@@ -253,6 +263,12 @@ lval* lval_add(lval* v, lval* x) {
 lval* lval_read(mpc_ast_t* t) {
   if (strstr(t->tag, "number")) {
     return lval_read_num(t);
+  } else if (strstr(t->tag, "boolean")) {
+    if (strcmp(t->contents, "#t") == 0) {
+      return lval_bool(true);
+    } else {
+      return lval_bool(false);
+    }
   } else if (strstr(t->tag, "symbol")) {
     return lval_sym(t->contents);
   }
@@ -299,6 +315,13 @@ void lval_print(lval* v) {
       printf("%li", v->num); 
       break;
 
+    case LVAL_BOOL:
+      if (v->boolean) {
+        printf("#t");
+      } else {
+        printf("#f");
+      }
+      break;
     case LVAL_ERR:
       printf("Error: %s\n", v->err);
       break;
@@ -345,6 +368,9 @@ lval* lval_copy(lval* v) {
   x->type = v->type;
 
   switch (v->type) {
+    case LVAL_BOOL:
+      x->boolean = v->boolean;
+      break;
     case LVAL_NUM: 
       x->num = v->num; 
       break;
@@ -593,6 +619,42 @@ lval* lval_call(lenv* e, lval* f, lval* a) {
 
 }
 
+bool lval_eqv(lval* x, lval* y) {
+  if (x->type != y->type) return false;
+
+  /* Compare Based upon type */
+  switch (x->type) {
+    /* Compare Number Value */
+    case LVAL_NUM: return (x->num == y->num);
+    case LVAL_BOOL: return (x->boolean == y->boolean);
+
+    /* Compare String Values */
+    case LVAL_ERR: return (strcmp(x->err, y->err) == 0);
+    case LVAL_SYM: return (strcmp(x->sym, y->sym) == 0);
+
+    /* If builtin compare, otherwise compare formals and body */
+    case LVAL_FUN:
+      if (x->builtin || y->builtin) {
+        return x->builtin == y->builtin;
+      } else {
+        return lval_eqv(x->formals, y->formals)
+          && lval_eqv(x->body, y->body);
+      }
+
+    /* If list compare every individual element */
+    case LVAL_QEXPR:
+    case LVAL_SEXPR:
+      if (x->count != y->count) { return 0; }
+      for (int i = 0; i < x->count; i++) {
+        /* If any element not equal then whole list not equal */
+        if (!lval_eqv(x->cell[i], y->cell[i])) { return 0; }
+      }
+      /* Otherwise lists must be equal */
+      return true;
+    break;
+  }
+  return false;
+}
 
 lval* lval_join(lval* x, lval* y) {
   while (y->count != 0) {
@@ -711,6 +773,85 @@ lval* builtin_put(lenv* e, lval* a) {
   return builtin_var(e, a, "=");
 }
 
+// TODO: Comparing symbols, lists, arbitrary number of things
+lval* builtin_comp(lenv* e, lval* a, char* comp) {
+// Make sure that a is 2 numbers
+  LASSERT(a, a->count == 2, "Comparison expected 2 numbers.");
+
+  for (int i = 0; i != a->count; ++i) {
+    if (a->cell[i]->type != LVAL_NUM) {
+      lval_del(a);
+      return lval_err("Comparison cannot operate on a non-number!");
+    }
+  }
+
+  lval* r = lval_bool(false);
+  lval* x = lval_pop(a, 0);
+  lval* y = lval_pop(a, 0);
+
+
+  if (strcmp(comp, "<") == 0) { r->boolean = x->num < y->num; };
+  if (strcmp(comp, ">") == 0) { r->boolean = x->num > y->num; };
+  if (strcmp(comp, "=") == 0) { r->boolean = x->num == y->num; };
+  if (strcmp(comp, ">=") == 0) { r->boolean = x->num >= y->num; };
+  if (strcmp(comp, "<=") == 0) { r->boolean = x->num <= y->num; };
+  if (strcmp(comp, "!=") == 0) { r->boolean = x->num != y->num; };
+  
+  lval_del(a);
+  lval_del(x);
+  lval_del(y);
+
+  return r;
+}
+
+lval* builtin_lt(lenv* e, lval* a) {
+  return builtin_comp(e, a, "<");
+}
+
+lval* builtin_gt(lenv* e, lval* a) {
+  return builtin_comp(e, a, ">");
+}
+lval* builtin_eq(lenv* e, lval* a) {
+  return builtin_comp(e, a, "=");
+}
+lval* builtin_neq(lenv* e, lval* a) {
+  return builtin_comp(e, a, "!=");
+}
+lval* builtin_geq(lenv* e, lval* a) {
+  return builtin_comp(e, a, ">=");
+}
+lval* builtin_leq(lenv* e, lval* a) {
+  return builtin_comp(e, a, "<=");
+}
+
+lval* builtin_eqv(lenv* e, lval* a) {
+  LASSERT(a, a->count, "'eqv?' expects 2 arguments");
+  return lval_bool(lval_eqv(a->cell[0], a->cell[1]));
+}
+
+lval* builtin_if(lenv* e, lval* a) {
+  LASSERT(a, a->count == 3, "Arity mismatch, 'if' expects 3 values but got %li", a->count);
+  LASSERT(a, a->cell[0]->type == LVAL_BOOL, "First argument to 'if' should be a bool");
+  LASSERT(a, a->cell[1]->type == LVAL_QEXPR, "'if' expected qexpr");
+  LASSERT(a, a->cell[2]->type == LVAL_QEXPR, "'if' expected qexpr");
+
+  /* Mark Both Expressions as evaluable */
+  lval* x;
+  a->cell[1]->type = LVAL_SEXPR;
+  a->cell[2]->type = LVAL_SEXPR;
+
+  if (a->cell[0]->boolean) {
+    /* If condition is true evaluate first expression */
+    x = lval_eval(e, lval_pop(a, 1));
+  } else {
+    /* Otherwise evaluate second expression */
+    x = lval_eval(e, lval_pop(a, 2));
+  }
+
+  /* Delete argument list and return */
+  lval_del(a);
+  return x;
+}
 
 void lenv_add_builtins(lenv* e) {
   /* List Functions */
@@ -725,6 +866,7 @@ void lenv_add_builtins(lenv* e) {
   lenv_add_builtin(e, "def", builtin_def);
   lenv_add_builtin(e, "=",   builtin_put);
   lenv_add_builtin(e, "\\", builtin_lambda);
+  lenv_add_builtin(e, "if", builtin_if);
   /* Mathematical Functions */
   lenv_add_builtin(e, "+", builtin_add);
   lenv_add_builtin(e, "-", builtin_sub);
@@ -732,6 +874,16 @@ void lenv_add_builtins(lenv* e) {
   lenv_add_builtin(e, "/", builtin_div);
   lenv_add_builtin(e, "%", builtin_mod);
   lenv_add_builtin(e, "^", builtin_pow);
+  /* Comparisons */
+  lenv_add_builtin(e, "eqv?", builtin_eqv);
+  lenv_add_builtin(e, "<", builtin_lt);
+  lenv_add_builtin(e, ">", builtin_gt);
+  lenv_add_builtin(e, "=", builtin_eq);
+  lenv_add_builtin(e, "!=", builtin_neq);
+  lenv_add_builtin(e, ">=", builtin_geq);
+  lenv_add_builtin(e, "<=", builtin_leq);
+
+  // TODO: Boolean functions, and, or, not
 }
 
 lval* lval_eval_sexpr(lenv* e,lval* v) {
@@ -782,6 +934,7 @@ lval* lval_eval(lenv* e,lval* v) {
 int main(int argc, char** argv) {
   /* Create Some Parsers */
   mpc_parser_t* Number = mpc_new("number");
+  mpc_parser_t* Boolean = mpc_new("boolean");
   mpc_parser_t* Symbol = mpc_new("symbol");
   mpc_parser_t* Sexpr = mpc_new("sexpr");
   mpc_parser_t* Qexpr = mpc_new("qexpr");
@@ -792,13 +945,14 @@ int main(int argc, char** argv) {
   mpca_lang(MPCA_LANG_DEFAULT,
 	    "\
 	    number   : /-?[0-9]+/ ; \
-	    symbol : /[\\^\\\%a-zA-Z0-9_+\\-*\\/\\\\=<>!&]+/ ;         \
+      boolean  : /#[tf]/  ; \
+	    symbol   : /[\\^\\\%a-zA-Z0-9_+\\-*\\/\\\\=<>!&\\?]+/ ;         \
       sexpr    : '(' <expr>* ')' ; \
       qexpr    : '{' <expr>* '}' ; \
-	    expr     : <number> | <symbol> | <sexpr> | <qexpr> ; \
+	    expr     : <number> | <boolean> | <symbol> | <sexpr> | <qexpr> ; \
 	    lispy    : /^/ <expr>* /$/ ; \
 	    ",
-	    Number, Symbol, Sexpr, Qexpr, Expr, Lispy);
+	    Number, Boolean, Symbol, Sexpr, Qexpr, Expr, Lispy);
   
   puts("Lispy Version 0.0.0.0.3");
   puts("Press Ctrl+c to Exit\n");
@@ -826,7 +980,7 @@ int main(int argc, char** argv) {
     free(input);
   }
   /* Undefine and Delete our Parsers */
-  mpc_cleanup(6, Number, Symbol, Sexpr, Qexpr, Expr, Lispy);
+  mpc_cleanup(7, Number, Boolean, Symbol, Sexpr, Qexpr, Expr, Lispy);
   
   return 0;
 }
