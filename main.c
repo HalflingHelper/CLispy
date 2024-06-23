@@ -39,7 +39,7 @@ void add_history(char* unused) {}
 
 
 typedef enum { LVAL_NUM, LVAL_ERR, LVAL_FUN, LVAL_BOOL, 
-               LVAL_SYM, LVAL_SEXPR, LVAL_QEXPR } Val_Type;
+               LVAL_STR, LVAL_SYM, LVAL_SEXPR, LVAL_QEXPR } Val_Type;
 
 struct lval;
 struct lenv;
@@ -55,6 +55,7 @@ struct lval {
   bool boolean;
   char* err;
   char* sym;
+  char* string;
   /* Functions */
   lbuiltin builtin;
   lenv* env;
@@ -154,6 +155,14 @@ lval* lval_num(long x) {
   return v;
 }
 
+lval* lval_str(char* s) {
+  lval* v = malloc(sizeof(lval));
+  v->type = LVAL_STR;
+  v->string = malloc(strlen(s) + 1);
+  strcpy(v->string, s);
+  return v;
+}
+
 lval* lval_bool(bool b) {
   lval* v = malloc(sizeof(lval));
   v->type = LVAL_BOOL;
@@ -220,6 +229,9 @@ void lval_del(lval* v) {
     case LVAL_NUM: 
     case LVAL_BOOL:
       break;
+    case LVAL_STR:
+      free(v->string);
+      break;
     case LVAL_FUN:
       if (v->builtin == NULL) {
         lenv_del(v->env);
@@ -260,6 +272,21 @@ lval* lval_add(lval* v, lval* x) {
   return v;
 }
 
+lval* lval_read_str(mpc_ast_t* t) {
+  /* Cut off the final quote character */
+  t->contents[strlen(t->contents)-1] = '\0';
+  /* Copy the string missing out the first quote character */
+  char* unescaped = malloc(strlen(t->contents+1)+1);
+  strcpy(unescaped, t->contents+1);
+  /* Pass through the unescape function */
+  unescaped = mpcf_unescape(unescaped);
+  /* Construct a new lval using the string */
+  lval* str = lval_str(unescaped);
+  /* Free the string and return */
+  free(unescaped);
+  return str;
+}
+
 lval* lval_read(mpc_ast_t* t) {
   if (strstr(t->tag, "number")) {
     return lval_read_num(t);
@@ -271,6 +298,8 @@ lval* lval_read(mpc_ast_t* t) {
     }
   } else if (strstr(t->tag, "symbol")) {
     return lval_sym(t->contents);
+  } else if (strstr(t->tag, "string")) {
+    return lval_read_str(t);
   }
 
   lval* x = NULL;
@@ -282,6 +311,7 @@ lval* lval_read(mpc_ast_t* t) {
   }
 
   for (int i = 0; i != t->children_num; ++i) {
+    if (strstr(t->children[i]->tag, "comment"))     { continue; }
     if (strcmp(t->children[i]->contents, "(") == 0) { continue; }
     if (strcmp(t->children[i]->contents, ")") == 0) { continue; }
     if (strcmp(t->children[i]->contents, "{") == 0) { continue; }
@@ -307,12 +337,28 @@ void lval_expr_print(lval* v, char open, char close) {
   putchar(close);
 }
 
+void lval_print_str(lval* v) {
+  /* Make a Copy of the string */
+  char* escaped = malloc(strlen(v->string)+1);
+  strcpy(escaped, v->string);
+  /* Pass it through the escape function */
+  escaped = mpcf_escape(escaped);
+  /* Print it between " characters */
+  printf("\"%s\"", escaped);
+  /* free the copied string */
+  free(escaped);
+}
+
 
 /* Print an "lval" */
 void lval_print(lval* v) {
   switch (v->type) {
     case LVAL_NUM: 
       printf("%li", v->num); 
+      break;
+
+    case LVAL_STR:
+      lval_print_str(v);
       break;
 
     case LVAL_BOOL:
@@ -373,6 +419,10 @@ lval* lval_copy(lval* v) {
       break;
     case LVAL_NUM: 
       x->num = v->num; 
+      break;
+    case LVAL_STR:
+      x->string = malloc(strlen(v->string) + 1);
+      strcpy(x->string, v->string);
       break;
     case LVAL_FUN:
       if (v->builtin != NULL) {
@@ -631,6 +681,7 @@ bool lval_eqv(lval* x, lval* y) {
     /* Compare String Values */
     case LVAL_ERR: return (strcmp(x->err, y->err) == 0);
     case LVAL_SYM: return (strcmp(x->sym, y->sym) == 0);
+    case LVAL_STR: return (strcmp(x->string, y->string) == 0);
 
     /* If builtin compare, otherwise compare formals and body */
     case LVAL_FUN:
@@ -934,7 +985,9 @@ lval* lval_eval(lenv* e,lval* v) {
 int main(int argc, char** argv) {
   /* Create Some Parsers */
   mpc_parser_t* Number = mpc_new("number");
+  mpc_parser_t* String = mpc_new("string");
   mpc_parser_t* Boolean = mpc_new("boolean");
+  mpc_parser_t* Comment = mpc_new("comment");
   mpc_parser_t* Symbol = mpc_new("symbol");
   mpc_parser_t* Sexpr = mpc_new("sexpr");
   mpc_parser_t* Qexpr = mpc_new("qexpr");
@@ -945,16 +998,18 @@ int main(int argc, char** argv) {
   mpca_lang(MPCA_LANG_DEFAULT,
 	    "\
 	    number   : /-?[0-9]+/ ; \
+      string   : /\"(\\\\.|[^\"])*\"/ ;  \
+      comment  : /;[^\\r\\n]*/ ; \
       boolean  : /#[tf]/  ; \
 	    symbol   : /[\\^\\\%a-zA-Z0-9_+\\-*\\/\\\\=<>!&\\?]+/ ;         \
       sexpr    : '(' <expr>* ')' ; \
       qexpr    : '{' <expr>* '}' ; \
-	    expr     : <number> | <boolean> | <symbol> | <sexpr> | <qexpr> ; \
+	    expr     : <number> | <string> | <comment> | <boolean> | <symbol> | <sexpr> | <qexpr> ; \
 	    lispy    : /^/ <expr>* /$/ ; \
 	    ",
-	    Number, Boolean, Symbol, Sexpr, Qexpr, Expr, Lispy);
+	    Number, String, Comment, Boolean, Symbol, Sexpr, Qexpr, Expr, Lispy);
   
-  puts("Lispy Version 0.0.0.0.3");
+  puts("CLisp Version 0.0.0.0.9");
   puts("Press Ctrl+c to Exit\n");
    
   lenv* e = lenv_new();
@@ -963,7 +1018,7 @@ int main(int argc, char** argv) {
   while (1) {
     
     /* Now in either case readline will be correctly defined */
-    char* input = readline("lispy> ");
+    char* input = readline("clisp> ");
     add_history(input);
 
     /* Parse the user input */
@@ -980,7 +1035,7 @@ int main(int argc, char** argv) {
     free(input);
   }
   /* Undefine and Delete our Parsers */
-  mpc_cleanup(7, Number, Boolean, Symbol, Sexpr, Qexpr, Expr, Lispy);
+  mpc_cleanup(9, Number, String, Comment, Boolean, Symbol, Sexpr, Qexpr, Expr, Lispy);
   
   return 0;
 }
