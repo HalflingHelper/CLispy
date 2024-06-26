@@ -37,6 +37,15 @@ void add_history(char* unused) {}
     return err; \
   }
 
+mpc_parser_t* Number;
+mpc_parser_t* String;
+mpc_parser_t* Boolean;
+mpc_parser_t* Comment;
+mpc_parser_t* Symbol;
+mpc_parser_t* Sexpr;
+mpc_parser_t* Qexpr;
+mpc_parser_t* Expr;
+mpc_parser_t* Lispy;
 
 typedef enum { LVAL_NUM, LVAL_ERR, LVAL_FUN, LVAL_BOOL, 
                LVAL_STR, LVAL_SYM, LVAL_SEXPR, LVAL_QEXPR } Val_Type;
@@ -266,7 +275,6 @@ lval* lval_read_num(mpc_ast_t* t) {
 
 lval* lval_add(lval* v, lval* x) {
   v->count++;
-  // Might be wront
   v->cell = realloc(v->cell, sizeof(lval*) * v->count);
   v->cell[v->count - 1] = x;
   return v;
@@ -517,6 +525,43 @@ lval* builtin_op(lenv* e, lval* a, char* op) {
   
   lval_del(a);
   return x;
+}
+
+lval* builtin_load(lenv* e, lval* a) {
+  LASSERT(a, a->count == 1, "'load' expects 1 argument.");
+  LASSERT(a, a->cell[0]->type == LVAL_STR, "'load' expects a string.");
+  mpc_result_t r;
+  if (mpc_parse_contents(a->cell[0]->string, Lispy, &r)) {
+    
+    lval* expr = lval_read(r.output);
+    mpc_ast_delete(r.output);
+
+    while (expr->count) {
+      lval* x = lval_eval(e, lval_pop(expr, 0));
+
+      if (x->type == LVAL_ERR) {
+        lval_println(x);
+      }
+      lval_del(x);
+    }
+
+    lval_del(expr);
+    lval_del(a);
+
+    return lval_sexpr();
+  } else {
+    puts("A");
+    char* err_msg = mpc_err_string(r.error);
+    mpc_err_delete(r.error);
+
+    lval* err = lval_err("Could not load Libarry %s", err_msg);
+    free(err_msg);
+    lval_del(a);
+
+    return err;
+  }
+    puts("C\n");
+
 }
 
 lval* builtin_var(lenv* e, lval* a, char* func) {
@@ -934,6 +979,8 @@ void lenv_add_builtins(lenv* e) {
   lenv_add_builtin(e, ">=", builtin_geq);
   lenv_add_builtin(e, "<=", builtin_leq);
 
+lenv_add_builtin(e, "load",  builtin_load);
+
   // TODO: Boolean functions, and, or, not
 }
 
@@ -984,15 +1031,15 @@ lval* lval_eval(lenv* e,lval* v) {
 
 int main(int argc, char** argv) {
   /* Create Some Parsers */
-  mpc_parser_t* Number = mpc_new("number");
-  mpc_parser_t* String = mpc_new("string");
-  mpc_parser_t* Boolean = mpc_new("boolean");
-  mpc_parser_t* Comment = mpc_new("comment");
-  mpc_parser_t* Symbol = mpc_new("symbol");
-  mpc_parser_t* Sexpr = mpc_new("sexpr");
-  mpc_parser_t* Qexpr = mpc_new("qexpr");
-  mpc_parser_t* Expr = mpc_new("expr");
-  mpc_parser_t* Lispy = mpc_new("lispy");
+  Number = mpc_new("number");
+  String = mpc_new("string");
+  Boolean = mpc_new("boolean");
+  Comment = mpc_new("comment");
+  Symbol = mpc_new("symbol");
+  Sexpr = mpc_new("sexpr");
+  Qexpr = mpc_new("qexpr");
+  Expr = mpc_new("expr");
+  Lispy = mpc_new("lispy");
 
   /* Define them with the following Language */
   mpca_lang(MPCA_LANG_DEFAULT,
@@ -1014,6 +1061,17 @@ int main(int argc, char** argv) {
    
   lenv* e = lenv_new();
   lenv_add_builtins(e);
+
+  if (argc >= 2) {
+    for (int i = 1; i != argc; ++i) {
+      lval* args = lval_add(lval_sexpr(), lval_str(argv[i]));
+
+      lval* x = builtin_load(e, args);
+
+      if (x->type == LVAL_ERR) { lval_println(x); }
+      lval_del(x);
+    }
+  }
 
   while (1) {
     
